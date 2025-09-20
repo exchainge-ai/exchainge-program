@@ -1,0 +1,27 @@
+{
+  "name": "exchainge-protocol",
+  "version": "0.1.0",
+  "description": "Solana data licensing and anti-piracy protocol",
+  "main": "index.js",
+  "scripts": {
+    "build": "PATH=\"/Users/rtavarez/.local/share/solana/install/active_release/bin:$PATH\" ~/.cargo/bin/anchor build --no-idl",
+    "deploy-localnet": "anchor deploy --provider.cluster localnet",
+    "deploy-devnet": "anchor deploy --provider.cluster devnet",
+    "deploy-mainnet": "anchor deploy --provider.cluster mainnet-beta",
+    "clean": "anchor clean"
+  },
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/exchainge-protocol"
+  },
+  "keywords": [
+    "solana",
+    "blockchain",
+    "data-licensing",
+    "anti-piracy",
+    "web3"
+  ],
+  "author": "ExchAInge Team",
+  "license": "MIT"
+}
