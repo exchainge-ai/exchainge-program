@@ -1,85 +1,79 @@
-#![allow(unexpected_cfgs)]
-#![allow(deprecated)]
-
 use anchor_lang::prelude::*;
 
-pub mod state;
-pub mod instructions;
 pub mod errors;
 pub mod events;
+pub mod instructions;
+pub mod state;
 
-pub use errors::ErrorCode;
 pub use events::*;
-pub use state::*;
-#[allow(ambiguous_glob_reexports)]
 pub use instructions::*;
+pub use state::*;
 
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
-/// ExchAInge Protocol - Physical AI Data Marketplace with SP1 Verification
-///
-/// Connects owners of robotics, drones and sensor data to AI teams that need that data
-/// to train, validate, and deploy models. Features SP1 zero-knowledge proof verification
-/// for hardware attestation and data authenticity.
 #[program]
 pub mod exchainge_protocol {
-    use anchor_lang::prelude::*;
-    use crate::{
-        instructions,
-        instructions::{AccessData, CreateListing, PurchaseLicense, VerifyData},
-        state::{AccessType, LicenseType, UsageRights},
-    };
+    use super::*;
 
-    /// Create a new data listing with metadata and pricing
-    pub fn create_listing(
-        ctx: Context<CreateListing>,
-        title: String,
-        price_usdc: u64,
-        license_type: LicenseType,
-        hash: String,
-        usage_rights: UsageRights,
-        royalty_bps: u16,
-        max_owners: Option<u32>,
-        license_duration_days: Option<u32>,
+    pub fn initialize_platform(
+        ctx: Context<InitializePlatform>,
+        treasury: Pubkey,
     ) -> Result<()> {
-        instructions::process_create_listing(
+        instructions::initialize_platform(ctx, treasury)
+    }
+
+    pub fn update_platform_config(
+        ctx: Context<UpdatePlatformConfig>,
+        new_treasury: Option<Pubkey>,
+        new_fee_bps: Option<u64>,
+        paused: Option<bool>,
+    ) -> Result<()> {
+        instructions::update_platform_config(ctx, new_treasury, new_fee_bps, paused)
+    }
+
+    pub fn register_dataset(
+        ctx: Context<RegisterDataset>,
+        internal_key: String,
+        metadata_uri: String,
+        data_hash: String,
+        price_lamports: u64,
+        license_type: LicenseType,
+        verifier_type: VerifierType,
+        verification_score: u8,
+    ) -> Result<()> {
+        instructions::register_dataset(
             ctx,
-            title,
-            price_usdc,
+            internal_key,
+            metadata_uri,
+            data_hash,
+            price_lamports,
             license_type,
-            hash,
-            usage_rights,
-            royalty_bps,
-            max_owners,
-            license_duration_days,
+            verifier_type,
+            verification_score,
         )
     }
 
-    /// Verify hardware data authenticity using SP1 proof
-    pub fn verify_hardware_data(
-        ctx: Context<VerifyData>,
-        proof_bytes: Vec<u8>,
-        public_values: Vec<u8>,
-        commitment: [u8; 32],
+    pub fn update_dataset(
+        ctx: Context<UpdateDataset>,
+        new_metadata_uri: Option<String>,
+        new_price_lamports: Option<u64>,
     ) -> Result<()> {
-        instructions::process_verify_hardware_data(ctx, proof_bytes, public_values, commitment)
+        instructions::update_dataset(ctx, new_metadata_uri, new_price_lamports)
     }
 
-    /// Purchase a license for a data listing
-    pub fn purchase_license(
-        ctx: Context<PurchaseLicense>,
-        listing_id: Pubkey,
-        payment_amount: u64,
+    pub fn update_verification(
+        ctx: Context<UpdateVerification>,
+        verifier_type: VerifierType,
+        verification_score: u8,
     ) -> Result<()> {
-        instructions::process_purchase_license(ctx, listing_id, payment_amount)
+        instructions::update_verification(ctx, verifier_type, verification_score)
     }
 
-    /// Record data access for usage tracking and royalties
-    pub fn access_data(
-        ctx: Context<AccessData>,
-        license_id: Pubkey,
-        access_type: AccessType,
-    ) -> Result<()> {
-        instructions::process_access_data(ctx, license_id, access_type)
+    pub fn purchase_dataset(ctx: Context<PurchaseDataset>) -> Result<()> {
+        instructions::purchase_dataset(ctx)
+    }
+
+    pub fn verify_access(ctx: Context<VerifyAccess>) -> Result<()> {
+        instructions::verify_access(ctx)
     }
 }

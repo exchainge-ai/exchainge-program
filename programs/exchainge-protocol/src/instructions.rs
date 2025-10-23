@@ -1,530 +1,421 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token, TokenAccount};
-use crate::{state::*, events::*};
-use crate::errors::ErrorCode;
+use anchor_lang::system_program;
 
-/// Core instruction handlers for the ExchAInge Protocol
-/// 
-/// This module implements the business logic for a Physical AI data marketplace.
-/// Functions include validation, security checks, and error handling.
+use crate::{
+    errors::ErrorCode,
+    events::*,
+    state::*,
+};
 
-/// SP1 proof result extracted from public values
-#[derive(AnchorSerialize, AnchorDeserialize)]
-pub struct ProofResult {
-    pub commitment: [u8; 32],
-    pub verification_score: u8,
-    pub physics_verified: bool,
-    pub anti_synthesis_score: u8,
-}
-
-impl TryFrom<&[u8]> for ProofResult {
-    type Error = anchor_lang::error::Error;
-
-    fn try_from(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 66 {
-            return Err(ErrorCode::InvalidPublicValues.into());
-        }
-        
-        let mut commitment = [0u8; 32];
-        commitment.copy_from_slice(&bytes[0..32]);
-        
-        let verification_score = bytes[32];
-        let physics_verified = bytes[33] != 0;
-        let anti_synthesis_score = bytes[34];
-        
-        Ok(ProofResult {
-            commitment,
-            verification_score,
-            physics_verified,
-            anti_synthesis_score,
-        })
-    }
-}
-
-/// Creates a new data listing in the marketplace
-pub fn process_create_listing(
-    ctx: Context<CreateListing>,
-    title: String,
-    price_usdc: u64,
-    license_type: LicenseType,
-    hash: String,
-    usage_rights: UsageRights,
-    royalty_bps: u16,
-    max_owners: Option<u32>,
-    license_duration_days: Option<u32>,
+// Initialize platform configuration. Called once on deployment.
+pub fn initialize_platform(
+    ctx: Context<InitializePlatform>,
+    treasury: Pubkey,
 ) -> Result<()> {
-    let clock = Clock::get().map_err(|_| ErrorCode::ClockUnavailable)?;
-    
-    // === COMPREHENSIVE INPUT VALIDATION ===
-    
-    // Title validation
-    require!(!title.is_empty(), ErrorCode::EmptyTitle);
-    require!(title.len() <= MAX_TITLE_LENGTH, ErrorCode::TitleTooLong);
-    require!(!title.trim().is_empty(), ErrorCode::EmptyTitle);
-    
-    // Price validation with minimum threshold
-    require!(price_usdc >= MIN_PRICE_USDC, ErrorCode::InvalidPrice);
-    
-    // Royalty validation
-    require!(royalty_bps <= MAX_ROYALTY_BPS, ErrorCode::InvalidRoyalty);
-    
-    // Content hash validation
-    require!(!hash.is_empty(), ErrorCode::InvalidContentHash);
-    require!(hash.len() <= MAX_CONTENT_HASH_LENGTH, ErrorCode::InvalidContentHash);
-    require!(
-        hash.starts_with(IPFS_HASH_PREFIX) || hash.len() == ARWEAVE_HASH_LENGTH,
-        ErrorCode::InvalidContentHash
-    );
-    
-    // Max owners validation
-    if let Some(max) = max_owners {
-        require!(max > 0 && max <= MAX_OWNERS_LIMIT, ErrorCode::InvalidMaxOwners);
-    }
-    
-    // License duration validation
-    if let Some(days) = license_duration_days {
-        require!(days > 0, ErrorCode::InvalidLicenseDuration);
-        let duration_seconds = days as i64 * 24 * 60 * 60;
-        require!(duration_seconds <= MAX_LICENSE_DURATION, ErrorCode::InvalidLicenseDuration);
-    }
-    
-    // === ANTI-SPAM PROTECTION ===
-    // TODO: Implement provider listing count check in future iteration
-    
-    // === POPULATE LISTING DATA ===
-    let listing = &mut ctx.accounts.listing;
-    
-    listing.provider = ctx.accounts.provider.key();
-    listing.title = title.clone();
-    listing.description = String::new();
-    listing.price_usdc = price_usdc;
-    listing.license_type = license_type.clone();
-    listing.usage_rights = usage_rights;
-    listing.content_hash = hash;
-    listing.verification_status = false;
-    listing.commitment = [0u8; 32];
-    listing.royalty_bps = royalty_bps;
-    listing.max_owners = max_owners;
-    listing.license_duration = license_duration_days.map(|days| {
-        clock.unix_timestamp.saturating_add(days as i64 * 24 * 60 * 60)
-    });
-    listing.created_at = clock.unix_timestamp;
-    listing.updated_at = clock.unix_timestamp;
-    listing.is_active = true;
-    listing.total_sales = 0;
-    listing.revenue_earned = 0;
-    listing.bump = 255; // Default bump since seeds removed for IDL compatibility
+    let config = &mut ctx.accounts.config;
 
-    emit!(ListingCreated {
-        listing_id: listing.key(),
-        provider: listing.provider,
-        title,
-        price_usdc,
+    config.authority = ctx.accounts.authority.key();
+    config.treasury = treasury;
+    config.fee_bps = PLATFORM_FEE_BPS;
+    config.paused = false;
+    config.total_platform_revenue = 0;
+    config.total_datasets = 0;
+    config.total_purchases = 0;
+    config.bump = ctx.bumps.config;
+
+    emit!(PlatformInitialized {
+        authority: config.authority,
+        treasury: config.treasury,
+        fee_bps: config.fee_bps,
+    });
+
+    Ok(())
+}
+
+// Update platform settings. Authority only.
+pub fn update_platform_config(
+    ctx: Context<UpdatePlatformConfig>,
+    new_treasury: Option<Pubkey>,
+    new_fee_bps: Option<u64>,
+    paused: Option<bool>,
+) -> Result<()> {
+    let config = &mut ctx.accounts.config;
+
+    if let Some(treasury) = new_treasury {
+        config.treasury = treasury;
+    }
+
+    if let Some(fee_bps) = new_fee_bps {
+        require!(fee_bps <= 2000, ErrorCode::PriceTooHigh); // TODO: Confirm max 20% fee.
+        config.fee_bps = fee_bps;
+    }
+
+    if let Some(p) = paused {
+        config.paused = p;
+    }
+
+    emit!(PlatformConfigUpdated {
+        authority: config.authority,
+        treasury: config.treasury,
+        fee_bps: config.fee_bps,
+        paused: config.paused,
+    });
+
+    Ok(())
+}
+
+// Register new dataset with metadata and pricing.
+pub fn register_dataset(
+    ctx: Context<RegisterDataset>,
+    internal_key: String,
+    metadata_uri: String,
+    data_hash: String,
+    price_lamports: u64,
+    license_type: LicenseType,
+    verifier_type: VerifierType,
+    verification_score: u8,
+) -> Result<()> {
+    let dataset = &mut ctx.accounts.dataset;
+    let config = &mut ctx.accounts.config;
+    let clock = Clock::get()?;
+
+    require!(!config.paused, ErrorCode::PlatformPaused);
+
+    let internal_key = internal_key.trim().to_string();
+    require!(
+        !internal_key.is_empty() && internal_key.len() <= MAX_INTERNAL_KEY_LENGTH,
+        ErrorCode::InvalidInternalKey
+    );
+
+    let metadata_uri = metadata_uri.trim().to_string();
+    require!(
+        !metadata_uri.is_empty() && metadata_uri.len() <= MAX_URI_LENGTH,
+        ErrorCode::InvalidUri
+    );
+
+    require!(data_hash.len() == 64, ErrorCode::InvalidContentHash);
+    require!(price_lamports >= MIN_PRICE_LAMPORTS, ErrorCode::PriceTooLow);
+    require!(price_lamports <= 1_000_000_000_000, ErrorCode::PriceTooHigh);
+    require!(verification_score <= 100, ErrorCode::InvalidScore);
+    require!(verification_score > 50, ErrorCode::LowScore);
+
+    dataset.owner = ctx.accounts.owner.key();
+    dataset.internal_key = internal_key.clone();
+    dataset.metadata_uri = metadata_uri;
+    dataset.data_hash = data_hash.clone();
+    dataset.verified = true;
+    dataset.verifier_type = verifier_type;
+    dataset.verification_score = verification_score;
+    dataset.license_type = license_type;
+    dataset.price_lamports = price_lamports;
+    dataset.seller_revenue = 0;
+    dataset.purchase_count = 0;
+    dataset.created_at = clock.unix_timestamp;
+    dataset.updated_at = clock.unix_timestamp;
+    dataset.bump = 0;
+
+    config.total_datasets = config
+        .total_datasets
+        .checked_add(1)
+        .ok_or(ErrorCode::MathOverflow)?;
+
+    emit!(DatasetRegistered {
+        dataset: dataset.key(),
+        owner: dataset.owner,
+        internal_key,
+        data_hash,
+        price_lamports,
+        verifier_type,
+        verification_score,
         license_type,
     });
 
     Ok(())
 }
 
-/// Verify hardware data authenticity with enterprise-grade validation
-pub fn process_verify_hardware_data(
-    ctx: Context<VerifyData>,
-    proof_bytes: Vec<u8>,
-    public_values: Vec<u8>,
-    commitment: [u8; 32],
+// Update dataset metadata or price. Owner only.
+pub fn update_dataset(
+    ctx: Context<UpdateDataset>,
+    new_metadata_uri: Option<String>,
+    new_price_lamports: Option<u64>,
 ) -> Result<()> {
-    let clock = Clock::get().map_err(|_| ErrorCode::ClockUnavailable)?;
-    
-    // === PROOF FORMAT VALIDATION ===
-    require!(!proof_bytes.is_empty(), ErrorCode::InvalidSP1Proof);
-    require!(proof_bytes.len() >= 32, ErrorCode::InvalidSP1Proof);
-    require!(proof_bytes.len() <= 8192, ErrorCode::InvalidSP1Proof); // Max 8KB proof
-    
-    require!(!public_values.is_empty(), ErrorCode::InvalidPublicValues);
-    require!(public_values.len() >= 66, ErrorCode::InvalidPublicValues); // Min expected size
-    require!(public_values.len() <= 1024, ErrorCode::InvalidPublicValues); // Max 1KB public values
-    
-    // === EXTRACT AND VALIDATE PROOF RESULTS ===
-    let proof_result: ProofResult = public_values.as_slice().try_into()?;
-    
-    // Commitment validation
-    require!(
-        proof_result.commitment == commitment,
-        ErrorCode::CommitmentMismatch
-    );
-    
-    // Ensure commitment is not all zeros
-    require!(
-        commitment != [0u8; 32],
-        ErrorCode::InvalidSP1Proof
-    );
-    
-    // Verification score validation
-    require!(
-        proof_result.verification_score >= MIN_VERIFICATION_THRESHOLD,
-        ErrorCode::InsufficientVerification
-    );
-    
-    // Anti-synthesis protection
-    require!(
-        proof_result.anti_synthesis_score >= MIN_VERIFICATION_THRESHOLD,
-        ErrorCode::SyntheticDataDetected
-    );
-    
-    // Physics verification requirement
-    require!(
-        proof_result.physics_verified,
-        ErrorCode::InvalidSP1Proof
-    );
-    
-    // === LISTING STATE VALIDATION ===
-    let listing = &mut ctx.accounts.listing;
-    
-    // Prevent double verification
-    require!(
-        !listing.verification_status,
-        ErrorCode::DuplicatePurchase // Reusing error for duplicate verification
-    );
-    
-    // Ensure listing is not expired
-    require!(
-        !listing.is_expired(clock.unix_timestamp),
-        ErrorCode::ListingExpired
-    );
-    
-    // === GENERATE VERIFICATION HASHES ===
-    let sp1_proof_hash = anchor_lang::solana_program::keccak::hash(&proof_bytes).to_bytes();
-    let public_values_hash = anchor_lang::solana_program::keccak::hash(&public_values).to_bytes();
-    
-    // === UPDATE LISTING ===
-    listing.verification_status = true;
-    listing.commitment = commitment;
-    listing.updated_at = clock.unix_timestamp;
-    
-    // === CREATE VERIFICATION RECORD ===
-    let verification = &mut ctx.accounts.hardware_verification;
-    verification.listing_id = listing.key();
-    verification.data_commitment = commitment;
-    verification.vendor = HardwareVendor::Custom; // Could be extracted from proof metadata
-    verification.device_id = "verified_device".to_string(); // Truncated for security
-    verification.verification_score = proof_result.verification_score;
-    verification.physics_verified = proof_result.physics_verified;
-    verification.anti_synthesis_score = proof_result.anti_synthesis_score;
-    verification.verifier_pubkey = ctx.accounts.provider.key();
-    verification.sp1_proof_hash = sp1_proof_hash;
-    verification.public_values_hash = public_values_hash;
-    verification.verified_at = clock.unix_timestamp;
-    verification.nonce = clock.unix_timestamp as u64; // Simple nonce for anti-replay
-    verification.bump = 255; // Default bump since seeds removed for IDL compatibility
+    let dataset = &mut ctx.accounts.dataset;
+    let clock = Clock::get()?;
 
-    emit!(DataVerified {
-        listing_id: listing.key(),
-        commitment,
-        verification_score: proof_result.verification_score,
-        verifier: ctx.accounts.provider.key(),
+    if let Some(uri) = new_metadata_uri {
+        require!(
+            !uri.trim().is_empty() && uri.len() <= MAX_URI_LENGTH,
+            ErrorCode::InvalidUri
+        );
+        dataset.metadata_uri = uri.trim().to_string();
+    }
+
+    if let Some(price) = new_price_lamports {
+        require!(price >= MIN_PRICE_LAMPORTS, ErrorCode::PriceTooLow);
+        require!(price <= 1_000_000_000_000, ErrorCode::PriceTooHigh);
+        dataset.price_lamports = price;
+    }
+
+    dataset.updated_at = clock.unix_timestamp;
+
+    emit!(DatasetUpdated {
+        dataset: dataset.key(),
+        metadata_uri: dataset.metadata_uri.clone(),
+        price_lamports: dataset.price_lamports,
     });
 
     Ok(())
 }
 
-/// Purchase license with enterprise security and payment protection
-pub fn process_purchase_license(
-    ctx: Context<PurchaseLicense>,
-    listing_id: Pubkey,
-    payment_amount: u64,
+// Update verification status after off-chain AI verification. Authority only.
+// TODO: Implement full AI and SP1 verification workflows.
+pub fn update_verification(
+    ctx: Context<UpdateVerification>,
+    verifier_type: VerifierType,
+    verification_score: u8,
 ) -> Result<()> {
-    let clock = Clock::get().map_err(|_| ErrorCode::ClockUnavailable)?;
-    let listing = &ctx.accounts.listing;
+    let dataset = &mut ctx.accounts.dataset;
+    let clock = Clock::get()?;
 
-    // === LISTING VALIDATION ===
-    require!(listing.key() == listing_id, ErrorCode::InvalidListingId);
-    require!(listing.is_active, ErrorCode::ListingInactive);
-    require!(listing.verification_status, ErrorCode::DataNotVerified);
-    require!(!listing.is_expired(clock.unix_timestamp), ErrorCode::ListingExpired);
+    require!(verification_score <= 100, ErrorCode::InvalidScore);
 
-    // === ANTI-FRAUD PROTECTION ===
-    // Prevent self-purchase
+    dataset.verifier_type = verifier_type;
+    dataset.verification_score = verification_score;
+    dataset.verified = verification_score > 50;
+    dataset.updated_at = clock.unix_timestamp;
+
+    emit!(DatasetVerified {
+        dataset: dataset.key(),
+        verifier_type,
+        verification_score,
+    });
+
+    Ok(())
+}
+
+// Purchase dataset with SOL payment. Splits payment 95% seller, 5% platform(could change tbd).
+// Uses native system program transfers only.
+pub fn purchase_dataset(ctx: Context<PurchaseDataset>) -> Result<()> {
+    let config = &ctx.accounts.config;
+    let dataset = &mut ctx.accounts.dataset;
+    let purchase = &mut ctx.accounts.purchase;
+    let clock = Clock::get()?;
+
+    require!(!config.paused, ErrorCode::PlatformPaused);
+    require!(dataset.verified, ErrorCode::DatasetNotVerified);
     require!(
-        listing.provider != ctx.accounts.buyer.key(),
-        ErrorCode::SelfPurchaseProhibited
+        ctx.accounts.buyer.key() != dataset.owner,
+        ErrorCode::SelfPurchaseNotAllowed
     );
 
-    // === PAYMENT VALIDATION ===
-    require!(
-        payment_amount >= listing.price_usdc,
-        ErrorCode::InsufficientPayment
-    );
-    
-    // Prevent massive overpayment (possible mistake or attack)
-    let max_payment = listing.price_usdc
-        .checked_mul(10)
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
-    require!(
-        payment_amount <= max_payment,
-        ErrorCode::InsufficientPayment
-    );
-
-    // === LICENSE TYPE RESTRICTIONS ===
-    match listing.license_type {
-        LicenseType::Exclusive | LicenseType::TransferableExclusive => {
-            require!(listing.total_sales == 0, ErrorCode::ExclusiveLicenseAlreadySold);
-        }
-        _ => {
-            if let Some(max_owners) = listing.max_owners {
-                require!(listing.total_sales < max_owners, ErrorCode::MaxOwnersReached);
-            }
-        }
-    }
-
-    // === TOKEN ACCOUNT VALIDATION ===
-    require!(
-        ctx.accounts.buyer_token_account.mint == ctx.accounts.usdc_mint.key(),
-        ErrorCode::InvalidTokenMint
-    );
-    require!(
-        ctx.accounts.provider_token_account.mint == ctx.accounts.usdc_mint.key(),
-        ErrorCode::InvalidTokenMint
-    );
-
-    // Check buyer has sufficient balance
-    require!(
-        ctx.accounts.buyer_token_account.amount >= payment_amount,
-        ErrorCode::InsufficientBalance
-    );
-
-    // === SECURE PAYMENT PROCESSING ===
-    let platform_fee = payment_amount
-        .checked_mul(PLATFORM_FEE_BPS)
-        .and_then(|x| x.checked_div(10_000))
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
-    
-    let seller_amount = payment_amount
+    // Calculate fees with checked arithmetic.
+    let total_price = dataset.price_lamports;
+    let platform_fee = total_price
+        .checked_mul(config.fee_bps)
+        .ok_or(ErrorCode::MathOverflow)?
+        .checked_div(BPS_DENOMINATOR)
+        .ok_or(ErrorCode::DivisionByZero)?;
+    let seller_revenue = total_price
         .checked_sub(platform_fee)
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
+        .ok_or(ErrorCode::MathUnderflow)?;
 
-    // Transfer USDC to provider (platform fee stays in buyer account for now)
-    let transfer_ix = anchor_spl::token::Transfer {
-        from: ctx.accounts.buyer_token_account.to_account_info(),
-        to: ctx.accounts.provider_token_account.to_account_info(),
-        authority: ctx.accounts.buyer.to_account_info(),
-    };
-
-    anchor_spl::token::transfer(
+    // Transfer seller revenue.
+    system_program::transfer(
         CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            transfer_ix,
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.buyer.to_account_info(),
+                to: ctx.accounts.seller.to_account_info(),
+            },
         ),
-        seller_amount,
-    ).map_err(|_| ErrorCode::PaymentFailed)?;
+        seller_revenue,
+    )?;
 
-    // === CREATE SECURE LICENSE TOKEN ===
-    let license = &mut ctx.accounts.license_token;
-    
-    license.listing_id = listing.key();
-    license.owner = ctx.accounts.buyer.key();
-    license.original_buyer = ctx.accounts.buyer.key();
-    license.license_type = listing.license_type.clone();
-    license.usage_rights = listing.usage_rights.clone();
-    license.purchase_price = payment_amount;
-    license.purchase_date = clock.unix_timestamp;
-    license.expiration = listing.license_duration;
-    license.access_count = 0;
-    license.last_access = 0;
-    license.usage_limit = None; // Could be enhanced based on license type
-    license.is_transferable = matches!(
-        listing.license_type,
-        LicenseType::TransferableExclusive
-    );
-    license.transfer_count = 0;
-    license.is_revoked = false;
-    license.bump = 255; // Default bump since seeds removed for IDL compatibility
-
-    // === UPDATE LISTING STATS ===
-    let listing = &mut ctx.accounts.listing;
-    listing.total_sales = listing.total_sales
-        .checked_add(1)
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
-    listing.revenue_earned = listing.revenue_earned
-        .checked_add(seller_amount)
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
-    listing.updated_at = clock.unix_timestamp;
-
-    // Deactivate listing if exclusive
-    if matches!(listing.license_type, LicenseType::Exclusive) {
-        listing.is_active = false;
-    }
-
-    emit!(LicensePurchased {
-        listing_id: listing.key(),
-        buyer: ctx.accounts.buyer.key(),
-        license_id: license.key(),
-        price: payment_amount,
+    // Transfer platform fee to treasury.
+    system_program::transfer(
+        CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.buyer.to_account_info(),
+                to: ctx.accounts.treasury.to_account_info(),
+            },
+        ),
         platform_fee,
+    )?;
+
+    dataset.seller_revenue = dataset
+        .seller_revenue
+        .checked_add(seller_revenue)
+        .ok_or(ErrorCode::MathOverflow)?;
+    dataset.purchase_count = dataset
+        .purchase_count
+        .checked_add(1)
+        .ok_or(ErrorCode::MathOverflow)?;
+
+    purchase.buyer = ctx.accounts.buyer.key();
+    purchase.dataset = dataset.key();
+    purchase.amount_paid = total_price;
+    purchase.platform_fee = platform_fee;
+    purchase.purchased_at = clock.unix_timestamp;
+    purchase.bump = 0;
+
+    let config = &mut ctx.accounts.config;
+    config.total_platform_revenue = config
+        .total_platform_revenue
+        .checked_add(platform_fee)
+        .ok_or(ErrorCode::MathOverflow)?;
+    config.total_purchases = config
+        .total_purchases
+        .checked_add(1)
+        .ok_or(ErrorCode::MathOverflow)?;
+
+    emit!(DatasetPurchased {
+        purchase: purchase.key(),
+        dataset: dataset.key(),
+        buyer: ctx.accounts.buyer.key(),
+        seller: dataset.owner,
+        total_amount: total_price,
+        platform_fee,
+        seller_revenue,
+    });
+
+    emit!(AccessGranted {
+        buyer: ctx.accounts.buyer.key(),
+        dataset: dataset.key(),
+        expires_at: 0, // Lifetime access
     });
 
     Ok(())
 }
 
-/// Record data access with comprehensive access control
-pub fn process_access_data(
-    ctx: Context<AccessData>,
-    license_id: Pubkey,
-    access_type: AccessType,
-) -> Result<()> {
-    let clock = Clock::get().map_err(|_| ErrorCode::ClockUnavailable)?;
-    let license = &mut ctx.accounts.license_token;
+// Verify purchase exists. Backend calls this before generating download URL.
+pub fn verify_access(ctx: Context<VerifyAccess>) -> Result<()> {
+    let purchase = &ctx.accounts.purchase;
 
-    // === LICENSE VALIDATION ===
-    require!(license.key() == license_id, ErrorCode::InvalidLicenseId);
-    require!(
-        license.owner == ctx.accounts.user.key(),
-        ErrorCode::UnauthorizedLicenseHolder
+    msg!(
+        "Access verified: buyer={}, dataset={}, purchased_at={}",
+        purchase.buyer,
+        purchase.dataset,
+        purchase.purchased_at
     );
 
-    // === ACCESS PERMISSION CHECKS ===
-    require!(license.can_access(clock.unix_timestamp), ErrorCode::LicenseExpired);
-    require!(!license.is_revoked, ErrorCode::LicenseRevoked);
-
-    // Check usage limits with overflow protection
-    if let Some(limit) = license.usage_limit {
-        require!(license.access_count < limit, ErrorCode::UsageLimitExceeded);
-    }
-
-    // === USAGE RIGHTS VALIDATION ===
-    // Validate access type against usage rights
-    match access_type {
-        AccessType::Download => {
-            // Basic download access - allowed for all license types
-        }
-        AccessType::Stream => {
-            // Streaming might have different restrictions
-        }
-        AccessType::API => {
-            // API access might require commercial rights
-            if !license.usage_rights.commercial_use {
-                require!(false, ErrorCode::FeatureNotAvailable);
-            }
-        }
-        AccessType::Compute => {
-            // Compute-to-data requires special permissions
-            require!(
-                license.usage_rights.ai_training_allowed,
-                ErrorCode::FeatureNotAvailable
-            );
-        }
-    }
-
-    // === UPDATE ACCESS METRICS ===
-    license.access_count = license.access_count
-        .checked_add(1)
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
-    license.last_access = clock.unix_timestamp;
-
-    emit!(DataAccessed {
-        license_id: license.key(),
-        user: ctx.accounts.user.key(),
-        access_type,
-        timestamp: clock.unix_timestamp,
-    });
-
     Ok(())
 }
 
-// === SECURE CONTEXT STRUCTURES ===
-
 #[derive(Accounts)]
-#[instruction(title: String)]
-pub struct CreateListing<'info> {
+pub struct InitializePlatform<'info> {
     #[account(
         init,
-        payer = provider,
-        space = DataListing::LEN
+        payer = authority,
+        space = 8 + PlatformConfig::INIT_SPACE,
+        seeds = [b"config"],
+        bump
     )]
-    pub listing: Account<'info, DataListing>,
+    pub config: Account<'info, PlatformConfig>,
 
     #[account(mut)]
-    pub provider: Signer<'info>,
+    pub authority: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct VerifyData<'info> {
+pub struct UpdatePlatformConfig<'info> {
     #[account(
         mut,
-        has_one = provider @ ErrorCode::UnauthorizedProvider,
-        constraint = !listing.verification_status @ ErrorCode::DuplicatePurchase
+        seeds = [b"config"],
+        bump = config.bump,
+        has_one = authority @ ErrorCode::Unauthorized
     )]
-    pub listing: Account<'info, DataListing>,
+    pub config: Account<'info, PlatformConfig>,
 
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(internal_key: String)]
+pub struct RegisterDataset<'info> {
     #[account(
         init,
-        payer = provider,
-        space = HardwareVerification::LEN
+        payer = owner,
+        space = 8 + Dataset::INIT_SPACE
     )]
-    pub hardware_verification: Account<'info, HardwareVerification>,
+    pub dataset: Account<'info, Dataset>,
 
     #[account(mut)]
-    pub provider: Signer<'info>,
+    pub config: Account<'info, PlatformConfig>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct PurchaseLicense<'info> {
+pub struct UpdateDataset<'info> {
     #[account(
         mut,
-        constraint = listing.is_active @ ErrorCode::ListingInactive,
-        constraint = listing.verification_status @ ErrorCode::DataNotVerified
+        has_one = owner @ ErrorCode::NotDatasetOwner
     )]
-    pub listing: Account<'info, DataListing>,
+    pub dataset: Account<'info, Dataset>,
 
+    pub owner: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateVerification<'info> {
+    #[account(mut)]
+    pub dataset: Account<'info, Dataset>,
+
+    #[account(
+        has_one = authority @ ErrorCode::Unauthorized
+    )]
+    pub config: Account<'info, PlatformConfig>,
+
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct PurchaseDataset<'info> {
     #[account(
         init,
         payer = buyer,
-        space = LicenseToken::LEN
+        space = 8 + Purchase::INIT_SPACE
     )]
-    pub license_token: Account<'info, LicenseToken>,
+    pub purchase: Account<'info, Purchase>,
+
+    #[account(mut)]
+    pub dataset: Account<'info, Dataset>,
+
+    #[account(mut)]
+    pub config: Account<'info, PlatformConfig>,
 
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    /// CHECK: Provider account validated in instruction
-    #[account(mut)]
-    pub provider: AccountInfo<'info>,
-
-    // USDC token accounts with enhanced validation
+    /// CHECK: Dataset owner validated via constraint.
     #[account(
         mut,
-        constraint = buyer_token_account.mint == usdc_mint.key() @ ErrorCode::InvalidTokenMint,
-        constraint = buyer_token_account.owner == buyer.key() @ ErrorCode::UnauthorizedAccess
+        constraint = seller.key() == dataset.owner @ ErrorCode::NotDatasetOwner
     )]
-    pub buyer_token_account: Account<'info, TokenAccount>,
+    pub seller: UncheckedAccount<'info>,
 
+    /// CHECK: Platform treasury validated via constraint.
     #[account(
         mut,
-        constraint = provider_token_account.mint == usdc_mint.key() @ ErrorCode::InvalidTokenMint,
-        constraint = provider_token_account.owner != buyer.key() @ ErrorCode::UnauthorizedAccess
+        constraint = treasury.key() == config.treasury @ ErrorCode::Unauthorized
     )]
-    pub provider_token_account: Account<'info, TokenAccount>,
+    pub treasury: UncheckedAccount<'info>,
 
-    #[account(
-        constraint = usdc_mint.decimals == 6 @ ErrorCode::InvalidTokenMint
-    )]
-    pub usdc_mint: Account<'info, Mint>,
-    
-    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct AccessData<'info> {
-    #[account(
-        mut,
-        constraint = license_token.owner == user.key() @ ErrorCode::UnauthorizedLicenseHolder,
-        constraint = !license_token.is_revoked @ ErrorCode::LicenseRevoked
-    )]
-    pub license_token: Account<'info, LicenseToken>,
+pub struct VerifyAccess<'info> {
+    pub purchase: Account<'info, Purchase>,
 
-    pub user: Signer<'info>,
+    #[account(
+        constraint = dataset.key() == purchase.dataset @ ErrorCode::NoPurchaseRecord
+    )]
+    pub dataset: Account<'info, Dataset>,
 }

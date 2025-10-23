@@ -1,40 +1,54 @@
 #![cfg(test)]
 
-use super::build_hardware_signature_message;
-use crate::types::HARDWARE_SIGNATURE_MAX_AGE;
-use anchor_lang::prelude::Pubkey;
-use ed25519_dalek::{Keypair, PublicKey as DalekPublicKey, SecretKey, Signer, Verifier};
+use crate::state::{LicenseType, VerifierType, BPS_DENOMINATOR, PLATFORM_FEE_BPS};
 
-fn fixture_keypair() -> Keypair {
-    let secret_bytes = [7u8; 32];
-    let secret = SecretKey::from_bytes(&secret_bytes).expect("static secret key");
-    let public = DalekPublicKey::from(&secret);
-    Keypair { secret, public }
+#[test]
+fn verifier_type_defaults_to_metadata() {
+    let default = VerifierType::default();
+    assert_eq!(default, VerifierType::Metadata);
 }
 
 #[test]
-fn hardware_signature_message_round_trip() {
-    let listing = Pubkey::new_unique();
-    let data_hash = "sensor_hash".to_string();
-    let timestamp = 1_700_000_000_i64;
-    let location = Some("nyc_coords".to_string());
-
-    let message = build_hardware_signature_message(&listing, &data_hash, timestamp, &location);
-    let keypair = fixture_keypair();
-    let signature = keypair.sign(&message);
-
-    // Round-trip verification using the same primitives as the on-chain program.
-    let public = DalekPublicKey::from_bytes(&keypair.public.to_bytes()).unwrap();
-    assert!(public.verify(&message, &signature).is_ok());
-
-    // Tampering with the message should invalidate the signature.
-    let mut tampered = message.clone();
-    tampered.push(42);
-    assert!(public.verify(&tampered, &signature).is_err());
+fn license_type_defaults_to_mit() {
+    let default = LicenseType::default();
+    assert_eq!(default, LicenseType::MIT);
 }
 
 #[test]
-fn signature_window_enforced() {
-    // Helper checks that constants expose the stricter 5 minute SLA.
-    assert!(HARDWARE_SIGNATURE_MAX_AGE <= 300);
+fn platform_fee_calculation() {
+    let price = 1_000_000_000;
+    let expected_fee = (price * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
+    assert_eq!(expected_fee, 50_000_000);
+
+    let price = 100_000_000;
+    let expected_fee = (price * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
+    assert_eq!(expected_fee, 5_000_000);
 }
+
+#[test]
+fn seller_revenue_calculation() {
+    let price = 1_000_000_000;
+    let platform_fee = (price * PLATFORM_FEE_BPS) / BPS_DENOMINATOR;
+    let seller_revenue = price - platform_fee;
+
+    assert_eq!(platform_fee, 50_000_000);
+    assert_eq!(seller_revenue, 950_000_000);
+}
+
+#[test]
+fn test_enums_serialization() {
+    use anchor_lang::AnchorSerialize;
+
+    let verifier = VerifierType::AiAgent;
+    let mut buf = Vec::new();
+    verifier.serialize(&mut buf).unwrap();
+    assert!(!buf.is_empty());
+
+    let license = LicenseType::Commercial;
+    let mut buf = Vec::new();
+    license.serialize(&mut buf).unwrap();
+    assert!(!buf.is_empty());
+}
+
+// TODO: Integration tests needed for platform init, dataset registration,
+// purchase flow, access verification, owner-only updates, and error cases.

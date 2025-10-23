@@ -1,195 +1,94 @@
 # ExchAInge Protocol
 
-Solana program for Physical AI data marketplace with SP1 zero knowledge proof verification.
+Solana program for a physical AI dataset marketplace with on-chain verification, payment processing, and access control.
 
-Robotics and drone operators sell verified data to AI teams. Frontend generates SP1 proofs, program validates and handles USDC payments.
-
-## Setup
+**Program ID:** `Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS`
+**LOC:** ~1000 lines, ~640 excluding comments
+**Status:** Compiles cleanly, audit required before mainnet
 
 ```bash
-# Install Solana CLI
-sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-
-# Install Anchor
-npm install -g @coral-xyz/anchor-cli@0.31.1
-
-# Build and deploy
-npm run build
-npm run deploy-localnet
+anchor build
+anchor test --skip-local-validator
 ```
 
-## Repository Structure
+## Architecture
 
 ```
 programs/exchainge-protocol/src/
-├── lib.rs              // Program entry point, instruction routing
-├── state.rs            // Account structures (DataListing, HardwareVerification, LicenseToken)  
-├── instructions.rs     // Business logic for create/verify/purchase/access
-├── errors.rs           // Error codes
-└── events.rs           // Event definitions for indexing
-
-Anchor.toml            // Program configuration
-package.json           // Build scripts
+├── lib.rs          (80 lines)   Program entrypoint
+├── instructions.rs (423 lines)  Core logic
+├── state.rs        (89 lines)   Account structures
+├── errors.rs       (50 lines)   Error codes
+├── events.rs       (63 lines)   Event definitions
+└── test.rs         (55 lines)   Unit tests
 ```
 
-## Core Concepts
+## Instructions
 
-**DataListing** Marketplace entry with price, metadata, verification status
-**HardwareVerification** Immutable SP1 proof validation record  
-**LicenseToken** NFT style license with usage rights and access control
+### Platform Setup
+- `initialize_platform` - One-time initialization with treasury and fee config
+- `update_platform_config` - Update treasury, fees, or pause state, authority only
 
-## Frontend Integration
+### Dataset Management
+- `register_dataset` - Create dataset with metadata, pricing, and verification score
+- `update_dataset` - Modify metadata or price, owner only
+- `update_verification` - Update AI verification results, authority only
 
-### create_listing
-```typescript
-await program.methods
-  .createListing(
-    title,           // string, max 100 chars
-    priceUsdc,       // u64, in microunits (1000 = $0.001)  
-    licenseType,     // enum: ViewOnly | Exclusive | etc
-    contentHash,     // string, IPFS/Arweave hash
-    usageRights,     // struct with permissions
-    royaltyBps,      // u16, max 5000 (50%)
-    maxOwners,       // Option<u32>
-    durationDays     // Option<u32>
-  )
-  .accounts({
-    listing: listingPda,
-    provider: wallet.publicKey,
-    systemProgram: SystemProgram.programId,
-  })
-  .rpc();
-```
+### Purchasing
+- `purchase_dataset` - Buy dataset with SOL, splits 95% seller / 5% platform
+- `verify_access` - Check purchase record exists, for backend download validation
 
-### verify_hardware_data  
-```typescript
-await program.methods
-  .verifyHardwareData(
-    proofBytes,      // Vec<u8>, raw SP1 proof
-    publicValues,    // Vec<u8>, proof inputs
-    commitment       // [u8; 32], data commitment
-  )
-  .accounts({
-    listing: listingPda,
-    hardwareVerification: verificationPda,
-    provider: wallet.publicKey,
-    systemProgram: SystemProgram.programId,
-  })
-  .rpc();
-```
+## Account Structures
 
-### purchase_license
-```typescript
-await program.methods
-  .purchaseLicense(
-    listingId,       // Pubkey
-    paymentAmount    // u64, USDC amount
-  )
-  .accounts({
-    listing: listingPda,
-    licenseToken: licensePda,
-    buyer: wallet.publicKey,
-    provider: providerPubkey,
-    buyerTokenAccount: buyerUsdcAccount,
-    providerTokenAccount: providerUsdcAccount,
-    usdcMint: USDC_MINT,
-    tokenProgram: TOKEN_PROGRAM_ID,
-    systemProgram: SystemProgram.programId,
-  })
-  .rpc();
-```
+**PlatformConfig**: Singleton with authority, treasury, fee config, pause state, and stats.
 
-### access_data
-```typescript
-await program.methods
-  .accessData(
-    licenseId,       // Pubkey
-    accessType       // enum: Download | Stream | API | Compute
-  )
-  .accounts({
-    licenseToken: licensePda,
-    user: wallet.publicKey,
-  })
-  .rpc();
-```
+**Dataset**: Owner, internal key, metadata URI, SHA256 hash, verification status and score, license type, price, revenue, and purchase count.
 
-## PDA Generation
+**Purchase**: Buyer, dataset, amount paid, platform fee, timestamp. One per buyer-dataset pair prevents double-purchase.
 
-```typescript
-// Listing PDA
-const [listingPda] = PublicKey.findProgramAddressSync(
-  [Buffer.from("listing"), provider.toBuffer(), Buffer.from(title)],
-  programId
-);
+## Key Features
 
-// License PDA  
-const [licensePda] = PublicKey.findProgramAddressSync(
-  [Buffer.from("license"), listingPda.toBuffer(), buyer.toBuffer()],
-  programId
-);
+**Payment Flow**: Native SOL transfers only. Purchase instruction calculates fees with checked arithmetic, transfers seller revenue to owner, transfers platform fee to treasury, creates purchase record, updates stats.
 
-// Verification PDA
-const [verificationPda] = PublicKey.findProgramAddressSync(
-  [Buffer.from("verification"), listingPda.toBuffer()],
-  programId
-);
-```
+**Validation**: SHA256 hash exactly 64 chars, verification score 0-100 and >50 for listing, price >= 0.0001 SOL and <= 1000 SOL, string length limits enforced.
+
+**Security**: All arithmetic uses checked operations, Anchor constraints for access control, no custom auth logic, prevents self-purchase and double-purchase.
+
+**Configuration**: Platform fee 5% in basis points, configurable before mainnet. Max fee capped at 20%. Emergency pause disables purchases.
+
+## Integration Points
+
+Frontend calls `register_dataset` after upload to R2/IPFS. Backend AI verification updates score via `update_verification`. Purchase flow creates on-chain record. Backend calls `verify_access` before generating signed download URL.
+
+## TODOs
+
+- Confirm platform fee percentage before mainnet, currently 5%.
+- Implement SP1 zero-knowledge proof verification workflow.
+- Implement hardware attestation via device signatures.
+- Add comprehensive integration tests for purchase flow and error cases.
+
+## Audit Focus
+
+**Critical**: Payment logic in `purchase_dataset`, fee calculation with checked math, correct transfer recipients, double-purchase prevention.
+
+**High**: Access control on update operations, input validation completeness, account size calculations.
+
+**Medium**: Event emissions, error handling, constant values.
+
+See AUDIT_SUMMARY.md for full audit documentation.
 
 ## Development
 
-### Prerequisites
-- Solana CLI v1.17+
-- Anchor Framework v0.31.1  
-- Node.js v18+
-- Rust with cargo build sbf
-
-### Local Testing
+Tests:
 ```bash
-# Terminal 1: Start validator
-solana-test-validator --reset
-
-# Terminal 2: Build and deploy
-npm run build
-npm run deploy-localnet
-
-# Verify deployment
-solana program show [PROGRAM_ID]
+cargo test --package exchainge-protocol --lib
 ```
 
-### Account Sizes
-- DataListing: 854 bytes (0.006 SOL rent)
-- HardwareVerification: 257 bytes (0.002 SOL rent)  
-- LicenseToken: 149 bytes (0.001 SOL rent)
+Deploy to localnet:
+```bash
+anchor deploy
+```
 
-### Key Configuration (src/state.rs)
-- PLATFORM_FEE_BPS: 300 (3% fee)
-- MIN_PRICE_USDC: 1000 (minimum $0.001)
-- MIN_VERIFICATION_THRESHOLD: 60 (verification score)
-- MAX_ROYALTY_BPS: 5000 (max 50% royalty)
+Update program ID after deployment in lib.rs and Anchor.toml.
 
-### Common Errors
-- InvalidPrice: Below minimum threshold
-- InsufficientPayment: Payment less than listing price
-- ExclusiveLicenseAlreadySold: Exclusive license unavailable
-- InvalidSP1Proof: Proof validation failed
-- UnauthorizedAccess: User lacks permissions
-
-### Events
-- ListingCreated: New marketplace entry
-- DataVerified: SP1 verification success
-- LicensePurchased: License sale completed
-- DataAccessed: Data usage recorded
-
-### Deployment
-- Localnet: `npm run deploy-localnet`
-- Devnet: `npm run deploy-devnet`
-- Mainnet: `npm run deploy-mainnet`
-
-Program ID changes per deployment. Update frontend accordingly.
-
-### Security Features
-- Checked arithmetic for financial calculations
-- Input validation on string lengths and numeric ranges
-- SP1 proof verification via hash validation
-- Platform fee automatically deducted from payments
-- License transfers limited to prevent abuse
+**Warning**: Not audited. Do not deploy to mainnet without security audit.
