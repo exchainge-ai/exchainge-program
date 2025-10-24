@@ -10,7 +10,6 @@
     "deploy-mainnet": "anchor deploy --provider.cluster mainnet-beta",
     "clean": "anchor clean"
   },
-  "dependencies": {},
   "repository": {
     "type": "git",
     "url": "https://github.com/your-org/exchainge-protocol"
@@ -23,5 +22,10 @@
     "web3"
   ],
   "author": "ExchAInge Team",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "chai": "^6.2.0"
+  }
 }

@@ -1,0 +1,27 @@
+[package]
+name = "exchainge-program"
+version = "0.1.0"
+description = "Solana data licensing and anti-piracy protocol"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "exchainge_program"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+
+[dependencies]
+anchor-lang = "0.31.1"
+anchor-spl = "0.31.1"
+sha2 = "0.10"
+

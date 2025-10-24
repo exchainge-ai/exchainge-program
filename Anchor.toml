@@ -5,13 +5,13 @@ anchor_version = "0.31.1"
 seeds = false
 skip-lint = false
 
-[programs.localnet]
-exchainge_protocol = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+[programs.testnet]
+exchainge_program = "2yvGQ26fz2mvPnxDa2wcTf5Y88hr9sTSJpiZdFqMyQ4L"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
-wallet = "~/.config/solana/id.json"
+cluster = "Testnet"
+wallet = "~/.config/solana/exchainge-shdw-keypair.json"
 
